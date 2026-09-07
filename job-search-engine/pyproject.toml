@@ -9,6 +9,9 @@ description = "Automated job-search engine: fetch, filter, dedup, and rank job p
 requires-python = ">=3.12"
 dependencies = [
     "requests>=2.31",
+    "google-auth>=2.23",
+    "google-api-python-client>=2.100",
+    "google-auth-httplib2>=0.2",
 ]
 
 [project.optional-dependencies]

@@ -11,3 +11,12 @@ dist/
 venv/
 .idea/
 .vscode/
+
+# Gmail/OAuth credentials - this project loads all Gmail credentials from
+# environment variables only (see gmail_auth.py), but these are ignored
+# defensively in case any file-based credentials are ever created locally
+# while experimenting (e.g. via google-auth-oauthlib's own tooling).
+credentials.json
+token.json
+client_secret*.json
+*.token.json
