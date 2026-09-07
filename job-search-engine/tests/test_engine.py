@@ -136,6 +136,26 @@ def test_run_search_uses_injected_profile_for_ranking():
     assert result.jobs[0].description.startswith("We use Rust")
 
 
+def test_run_search_prioritizes_buffalo_jobs_end_to_end():
+    now = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    strong_elsewhere = _job(
+        "1", "AI/ML Engineer", "RAG, LangChain, PyTorch, Kafka, AWS. 3-5 years.",
+        location="San Francisco, CA", days_ago=1, now=now,
+    )
+    weak_in_buffalo = _job(
+        "2", "Software Engineer", "General role, no strong overlap. 3-5 years.",
+        location="Buffalo, NY", days_ago=1, now=now,
+    )
+
+    source = FakeSource("fake", jobs=[strong_elsewhere, weak_in_buffalo])
+    config = Config()
+
+    # Using the real default profile (which prioritizes Buffalo) end to end.
+    result = run_search(config, sources=[source], reference_time=now)
+
+    assert result.jobs[0].location == "Buffalo, NY"
+
+
 # --- seen-job tracking integration ------------------------------------------
 
 

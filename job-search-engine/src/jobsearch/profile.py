@@ -33,12 +33,17 @@ class CandidateProfile:
     target_roles: Dict[str, float] = field(default_factory=dict)
     domain_experience: List[str] = field(default_factory=list)
     projects: List[str] = field(default_factory=list)
+    # Locations to prioritize above fit score alone (e.g. where the
+    # candidate lives/studies). Matched as a whole word/phrase against a
+    # job's location string - see jobsearch.ranking for how this is used.
+    preferred_locations: List[str] = field(default_factory=list)
 
 
 def default_profile(years_of_experience: float = 4.0) -> CandidateProfile:
     """The profile built from Abhishek's stated background:
 
     - MS Computer Science (AI/ML specialization), University at Buffalo
+    - Studies and resides in Buffalo, NY - local openings are prioritized
     - ~4 years of professional software engineering experience
     - HSBC: Software Engineer / Senior Software Engineer, backend and
       distributed systems, financial payments systems
@@ -93,10 +98,14 @@ def default_profile(years_of_experience: float = 4.0) -> CandidateProfile:
     # rather than inventing any.
     projects: List[str] = []
 
+    # Studies and resides in Buffalo, NY - prioritize local openings.
+    preferred_locations: List[str] = ["buffalo"]
+
     return CandidateProfile(
         years_of_experience=years_of_experience,
         skills=skills,
         target_roles=target_roles,
         domain_experience=domain_experience,
         projects=projects,
+        preferred_locations=preferred_locations,
     )

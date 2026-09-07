@@ -32,6 +32,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from jobsearch.keyword_match import contains_keyword
 from jobsearch.models import Job
 
 # Technologies/tools specific enough that a "years of experience" mention
@@ -103,10 +104,10 @@ class _YearsMention:
 def _classify_context(context: str) -> Tuple[str, Optional[str]]:
     """Given a lowercased clause of text around a years-mention, classify it."""
     for keyword in OVERALL_CONTEXT_KEYWORDS:
-        if keyword in context:
+        if contains_keyword(context, keyword):
             return "overall", None
     for keyword in TECH_KEYWORDS:
-        if keyword in context:
+        if contains_keyword(context, keyword):
             return "tech_specific", keyword
     return "unspecified", None
 

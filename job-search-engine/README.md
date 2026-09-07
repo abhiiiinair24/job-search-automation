@@ -12,8 +12,11 @@ src/jobsearch/
   models.py            Job dataclass, SponsorshipStatus/SourceType enums,
                         stable_id (dedup key) and most_recent_date helpers
   config.py             Config dataclass, loaded entirely from env vars
+  keyword_match.py        Word-boundary-safe keyword matching, shared by
+                          ranking.py and filters/experience.py
   profile.py             CandidateProfile dataclass + default_profile() —
-                          your skills/roles/experience, kept out of ranking.py
+                          your skills/roles/experience/preferred locations,
+                          kept out of ranking.py
   seen_store.py           SeenJobStore abstraction (in-memory + JSON-backed)
                           for tracking which jobs have already been surfaced
   sources/
@@ -33,7 +36,7 @@ src/jobsearch/
                           -> rank, with optional profile/seen_store injection
   cli.py                  argparse CLI, prints a formatted report
 
-tests/                   133 unit/integration tests, no real network calls
+tests/                   161 unit/integration tests, no real network calls
 ```
 
 ### Design decisions worth knowing about
@@ -61,7 +64,26 @@ tests/                   133 unit/integration tests, no real network calls
   only used as a fallback when no general requirement is stated anywhere
   in the posting. This is regex/heuristic, not ML — see
   `filters/experience.py` for the exact keyword lists.
-- **Candidate profile lives in `profile.py`, not `ranking.py`.**
+- **Skill/title/domain matching is word-boundary aware, not plain
+  substring search.** `jobsearch/keyword_match.py` fixes a real bug where
+  short keywords like "rag" matched inside unrelated words — "storage"
+  and "leverage" both contain the substring "rag" — or "sql" matched
+  inside "mysql". Matching now requires the keyword not be immediately
+  preceded/followed by a letter or digit, so "rag" only matches as the
+  whole word "RAG", not as a substring of "average", "storage",
+  "leverage", or "paragraph". This is used everywhere keywords are
+  matched against job text: `ranking.py` (skills, target roles, domain
+  experience) and `filters/experience.py` (overall-vs-tech-specific
+  classification).
+- **Preferred-location prioritization (e.g. Buffalo, NY).**
+  `CandidateProfile.preferred_locations` (set to `["buffalo"]` in the
+  default profile, since Abhishek studies and resides there) is a hard
+  priority tier in `rank_jobs()`: every job matching a preferred location
+  is sorted ahead of every job that doesn't, regardless of fit score — not
+  just a scoring nudge. Within each tier, jobs are still sorted by
+  descending fit score. A fit-score bonus (`preferred_location_bonus`) is
+  also applied so the "why it matches" explanation and ordering *within*
+  the preferred-location group make sense on their own.
   `CandidateProfile` is a plain dataclass (skills, target roles, years of
   experience, domain experience, projects); `default_profile()` builds the
   one used for Abhishek from what he's actually provided — nothing

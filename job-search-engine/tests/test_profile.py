@@ -50,6 +50,11 @@ def test_default_profile_has_no_invented_projects():
     assert profile.projects == []
 
 
+def test_default_profile_prioritizes_buffalo():
+    profile = default_profile()
+    assert "buffalo" in [loc.lower() for loc in profile.preferred_locations]
+
+
 def test_candidate_profile_is_a_plain_dataclass_usable_standalone():
     profile = CandidateProfile(
         years_of_experience=1.0,

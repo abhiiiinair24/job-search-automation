@@ -158,3 +158,150 @@ def test_score_job_rewards_domain_experience_match(make_job):
 def test_ranking_weights_candidate_years_reflects_profile():
     weights = RankingWeights(profile=default_profile(years_of_experience=4.0))
     assert weights.candidate_years == 4.0
+
+
+# --- Regression: word-boundary matching (no more substring false positives) --
+
+
+def test_score_job_does_not_match_rag_inside_average(make_job):
+    # Reproduces a real false positive seen in production: "rag" matching
+    # inside "average" on a posting with nothing to do with RAG/LLMs.
+    job = make_job(
+        title="Backend Engineer, Credit Coverage",
+        description="You'll compute the average transaction volume across our systems.",
+    )
+    score_job(job)
+    assert "rag" not in job.matched_keywords
+
+
+def test_score_job_does_not_match_rag_inside_storage_or_leverage(make_job):
+    job = make_job(
+        title="Technical Solutions Engineer",
+        description="You'll leverage our cloud storage systems to help customers.",
+    )
+    score_job(job)
+    assert "rag" not in job.matched_keywords
+
+
+def test_score_job_still_matches_real_rag_mentions(make_job):
+    job = make_job(
+        title="AI/ML Engineer",
+        description="You'll build RAG pipelines with LangChain and PyTorch.",
+    )
+    score_job(job)
+    assert "rag" in job.matched_keywords
+
+
+def test_score_job_does_not_match_sql_inside_mysql(make_job):
+    profile = CandidateProfile(
+        years_of_experience=4.0,
+        skills={"sql": 2.0, "mysql": 1.0},
+        target_roles={},
+        domain_experience=[],
+        projects=[],
+    )
+    weights = RankingWeights(profile=profile)
+    job = make_job(description="We use MySQL as our primary datastore.")
+    score_job(job, weights)
+    assert "sql" not in job.matched_keywords
+    assert "mysql" in job.matched_keywords
+
+
+# --- Preferred-location prioritization (e.g. Buffalo, NY) -------------------
+
+
+def test_score_job_adds_bonus_for_preferred_location(make_job):
+    profile = CandidateProfile(
+        years_of_experience=4.0,
+        skills={"java": 2.0},
+        target_roles={},
+        domain_experience=[],
+        projects=[],
+        preferred_locations=["buffalo"],
+    )
+    weights = RankingWeights(profile=profile)
+
+    buffalo_job = make_job(location="Buffalo, NY", description="Java role.")
+    other_job = make_job(location="Austin, TX", description="Java role.")
+
+    score_job(buffalo_job, weights)
+    score_job(other_job, weights)
+
+    assert buffalo_job.fit_score > other_job.fit_score
+    assert "preferred location" in buffalo_job.fit_explanation.lower()
+
+
+def test_score_job_no_bonus_when_location_does_not_match(make_job):
+    profile = CandidateProfile(
+        years_of_experience=4.0,
+        skills={},
+        target_roles={},
+        domain_experience=[],
+        projects=[],
+        preferred_locations=["buffalo"],
+    )
+    weights = RankingWeights(profile=profile)
+    job = make_job(location="Austin, TX", description="")
+    score_job(job, weights)
+    assert "preferred location" not in job.fit_explanation.lower()
+
+
+def test_rank_jobs_puts_preferred_location_first_even_with_lower_fit_score(make_job):
+    profile = CandidateProfile(
+        years_of_experience=4.0,
+        skills={
+            "python": 2.0, "java": 2.0, "kafka": 2.0, "aws": 2.0, "kubernetes": 2.0,
+            "docker": 2.0, "terraform": 2.0, "rag": 2.5, "langchain": 2.5,
+        },
+        target_roles={"ai/ml engineer": 3.0},
+        domain_experience=[],
+        projects=[],
+        preferred_locations=["buffalo"],
+    )
+    weights = RankingWeights(profile=profile)
+
+    # A strong-fit job located elsewhere...
+    strong_elsewhere = make_job(
+        location="San Francisco, CA",
+        title="AI/ML Engineer",
+        description="RAG, LangChain, Python, Java, Kafka, AWS, Kubernetes, Docker, Terraform.",
+    )
+    # ...vs a weak-fit job in Buffalo, NY.
+    weak_in_buffalo = make_job(
+        location="Buffalo, NY",
+        title="Software Engineer",
+        description="General role, no strong keyword overlap.",
+    )
+
+    ranked = rank_jobs([strong_elsewhere, weak_in_buffalo], weights=weights)
+
+    # Confirm the fit scores really would have ranked the other way without
+    # location prioritization, so this test is actually checking something.
+    assert strong_elsewhere.fit_score > weak_in_buffalo.fit_score
+    assert ranked[0] is weak_in_buffalo
+    assert ranked[1] is strong_elsewhere
+
+
+def test_rank_jobs_orders_multiple_preferred_location_jobs_by_fit_score(make_job):
+    profile = CandidateProfile(
+        years_of_experience=4.0,
+        skills={"java": 2.0, "kafka": 2.0},
+        target_roles={},
+        domain_experience=[],
+        projects=[],
+        preferred_locations=["buffalo"],
+    )
+    weights = RankingWeights(profile=profile)
+
+    strong_buffalo = make_job(location="Buffalo, NY", description="Java, Kafka role.")
+    weak_buffalo = make_job(location="Buffalo, NY", description="General role.")
+
+    ranked = rank_jobs([weak_buffalo, strong_buffalo], weights=weights)
+
+    assert ranked[0] is strong_buffalo
+    assert ranked[1] is weak_buffalo
+
+
+def test_default_profile_prioritizes_buffalo():
+    profile = default_profile()
+    assert any("buffalo" in loc.lower() for loc in profile.preferred_locations)
