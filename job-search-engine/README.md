@@ -1,10 +1,12 @@
 # jobsearch — automated job-search engine, Gmail delivery, and scheduling
 
-This project fetches job postings (Greenhouse + Lever), filters and ranks
-them against a candidate profile, emails the results via the Gmail API,
-and — via a GitHub Actions workflow — runs on a schedule and remembers
-what it already sent you, so you only ever hear about genuinely new
-postings.
+This project **discovers** job postings by searching for your target
+roles (via the Adzuna job-search API — no company list to maintain),
+optionally watches specific companies directly (Greenhouse/Lever), filters
+and ranks everything against a candidate profile, emails the results via
+the Gmail API, and — via a GitHub Actions workflow — runs on a schedule
+and remembers what it already sent you, so you only ever hear about
+genuinely new postings.
 
 **Repository layout** (this matters for where files go — see "GitHub
 Actions considerations" below):
@@ -13,7 +15,7 @@ Actions considerations" below):
 job-search-automation/            <- git repo root
 ├── .github/workflows/job-search.yml    <- MUST live at repo root
 └── job-search-engine/                   <- the actual Python package
-    ├── config/boards.json                <- editable board/company list
+    ├── config/boards.json                <- OPTIONAL direct-watch list
     ├── data/seen_jobs.json                <- persisted seen-job state
     ├── src/jobsearch/...
     └── tests/...
@@ -25,11 +27,11 @@ job-search-automation/            <- git repo root
 src/jobsearch/
   models.py            Job dataclass, SponsorshipStatus/SourceType enums,
                         stable_id (dedup key) and most_recent_date helpers
-  config.py             Config dataclass, loaded from env vars (boards
-                         config file is the default source for board lists)
-  boards_config.py       BoardsConfig — loads config/boards.json; this is
-                          how you add/remove companies without touching
-                          any code or CI workflow
+  config.py             Config dataclass, loaded from env vars (Adzuna
+                         credentials + the optional boards config file)
+  boards_config.py       BoardsConfig — loads config/boards.json (optional
+                          direct-watch list); no code/CI changes needed to
+                          edit it
   keyword_match.py        Word-boundary-safe keyword matching, shared by
                           ranking.py and filters/experience.py
   profile.py             CandidateProfile dataclass + default_profile() —
@@ -39,8 +41,15 @@ src/jobsearch/
                           for tracking which jobs have already been emailed
   sources/
     base.py             JobSource ABC + safe_fetch_jobs() error boundary
+    adzuna.py             AdzunaDiscoverySource — PRIMARY discovery: searches
+                          by target role, not by company (see below)
+    enrichment.py           Best-effort Greenhouse/Lever enrichment of
+                            Adzuna-discovered jobs (cleaner URL/description
+                            when a confident match is found; never required)
     greenhouse.py        Greenhouse public job-board API integration
+                          (direct-watch, optional)
     lever.py             Lever public postings API integration
+                          (direct-watch, optional)
   filters/
     experience.py         Years-of-experience extraction (overall vs.
                           tech-specific) + hard filter
@@ -68,9 +77,9 @@ src/jobsearch/
                              calls
 
 config/
-  boards.json             Editable list of Greenhouse boards / Lever
-                          companies to search — see "Adding/removing
-                          companies" below
+  boards.json             OPTIONAL editable list of Greenhouse boards /
+                          Lever companies to also always watch directly —
+                          NOT required; Adzuna discovery works standalone
 data/
   seen_jobs.json           Persisted "already emailed" job ids, committed
                           back to the repo by the GitHub Actions workflow
@@ -85,7 +94,7 @@ scripts/
                            workflow (repo-root level, NOT inside
                            job-search-engine/ - see below)
 
-tests/                   264 unit/integration tests, no real network calls
+tests/                   312 unit/integration tests, no real network calls
 ```
 
 ### Design decisions worth knowing about
@@ -131,10 +140,29 @@ tests/                   264 unit/integration tests, no real network calls
   call `seen_store.mark_seen(...)`. A Gmail failure, an invalid
   config/credential, or a seen-store write failure all raise
   `OrchestrationError` and stop before anything gets marked as seen.
-- **Board/company configuration lives in a plain JSON file**
-  (`config/boards.json`), not environment variables or the GitHub Actions
-  workflow — `Config.from_env()` reads it automatically whenever
-  `GREENHOUSE_BOARDS`/`LEVER_COMPANIES` env vars aren't explicitly set.
+- **Board/company configuration (Greenhouse/Lever) is OPTIONAL, in a
+  plain JSON file** (`config/boards.json`), not required for the system
+  to find anything — `Config.from_env()` reads it automatically whenever
+  `GREENHOUSE_BOARDS`/`LEVER_COMPANIES` env vars aren't explicitly set,
+  but discovery (below) works with zero entries in this file.
+- **Adzuna is the PRIMARY discovery mechanism** (`sources/adzuna.py`) —
+  it searches by target role/keyword (derived from
+  `CandidateProfile.target_roles` unless overridden), not by company, so
+  no company list needs to be maintained anywhere for the system to find
+  new employers. Greenhouse/Lever remain fully supported as an *optional*
+  direct-watch addition on top of discovery, never a requirement. Adzuna
+  does **not** provide complete US job-market coverage — it's one
+  aggregator among several; treat it as a broad, free sample. See "Job
+  discovery via Adzuna" below for setup, quota math, and this tradeoff in
+  more depth.
+- **Greenhouse/Lever enrichment of Adzuna results is best-effort and
+  conservative** (`sources/enrichment.py`): for each company Adzuna
+  surfaces (capped per run), a couple of plausible board-slug guesses are
+  tried against both APIs, and a posting is only swapped in when its
+  title matches *exactly* after normalization — no fuzzy/partial matches,
+  to avoid conflating two different roles at the same company. Enrichment
+  failing or being skipped never drops the job; Adzuna's own URL and
+  description remain the fallback.
 - **The GitHub Actions schedule uses a runtime local-time guard** to
   approximate America/New_York 8am/8pm despite GitHub cron being UTC-only
   and DST-unaware — see "How the scheduled workflow works" below.
@@ -163,9 +191,11 @@ no seen-tracking side effects):
 python3 -m jobsearch.cli --limit 15 --top 4
 ```
 
-By default this reads boards from `config/boards.json` (see "Adding and
-removing companies" below), not from `GREENHOUSE_BOARDS`/`LEVER_COMPANIES`
-— those env vars still work if you want a one-off override.
+By default this reads target roles from your candidate profile and
+searches Adzuna for them (see "Job discovery via Adzuna" below), plus any
+companies listed in `config/boards.json` (optional). `GREENHOUSE_BOARDS`/
+`LEVER_COMPANIES` env vars still work if you want a one-off override of
+the boards file.
 
 **Full scheduled-style run** (search + email + mark-seen — the same thing
 the GitHub Actions workflow runs):
@@ -177,6 +207,50 @@ python3 -m jobsearch.orchestrator
 This requires the Gmail environment variables below to be set. It's safe
 to run repeatedly: jobs already marked seen (in `data/seen_jobs.json`)
 won't be re-emailed.
+
+## Job discovery via Adzuna (one-time setup)
+
+This is what makes the system find companies you never named. Adzuna is
+a real job-search API — you search by role/keyword, not by company — with
+a genuine free tier, and **"personal research" is an explicitly permitted
+use case** in its API Terms of Service (this project's use qualifies).
+
+1. Go to [developer.adzuna.com](https://developer.adzuna.com/) and
+   register — self-service, instant, no approval wait.
+2. You'll get an **App ID** and **App Key** immediately. Add them to
+   `.env` as `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` (and later as GitHub
+   Actions secrets — see below).
+3. That's it — no further setup. By default, search terms are pulled
+   automatically from your candidate profile's target roles
+   (`profile.py`), so there's nothing to enumerate or maintain.
+
+**What this does and doesn't give you:**
+- Searches are US-only (`/v1/api/jobs/us/search`) and scoped to postings
+  created within `ADZUNA_MAX_DAYS_OLD` (default 4) — both align with the
+  existing recency/location filters, which still run afterward as a
+  second check.
+- Adzuna's own listing includes a `redirect_url` (works, but routes
+  through Adzuna rather than being the company's own link) and a
+  *truncated* description. The enrichment step (`sources/enrichment.py`)
+  tries to replace both with a cleaner Greenhouse/Lever direct link when
+  it can confidently match the posting — see the design-decisions bullet
+  above for exactly how conservative that match has to be.
+- **Adzuna does not index the entire US job market.** It's a broad,
+  genuinely free aggregator, not an authoritative or exhaustive source —
+  some companies (especially ones that only post to their own
+  Greenhouse/Lever board and nowhere else) may never surface via Adzuna
+  at all. Direct-watch (`config/boards.json`) remains available exactly
+  for that gap, on a per-company basis.
+
+**Free-tier quota, and how this project stays inside it:** Adzuna's
+documented limits are 25/min, 250/day, 1,000/week, 2,500/month. This
+project issues one Adzuna API call per target role per run (8 roles by
+default) — roughly 16 calls/day at the twice-daily schedule, ~480/month —
+comfortably inside every one of those ceilings, with real headroom for
+retries. `ADZUNA_RESULTS_PER_PAGE` (default 25) and
+`ADZUNA_ENRICHMENT_MAX_COMPANIES` (default 20, and this only counts
+against Greenhouse/Lever, not Adzuna's own quota) keep this modest by
+design — raise them only with the quota math above in mind.
 
 ## Gmail API setup (one-time)
 
@@ -218,20 +292,36 @@ an auth error, that's the first thing to check; re-run step 5 for a new one.
 
 | Variable | Required | Where it's used | Purpose |
 |---|---|---|---|
+| `ADZUNA_APP_ID` | yes* | secret | Adzuna App ID — free signup at developer.adzuna.com |
+| `ADZUNA_APP_KEY` | yes* | secret | Adzuna App Key |
 | `GMAIL_CLIENT_ID` | yes | secret | OAuth2 client ID from the Desktop app credentials |
 | `GMAIL_CLIENT_SECRET` | yes | secret | OAuth2 client secret |
 | `GMAIL_REFRESH_TOKEN` | yes | secret | Long-lived refresh token from the one-time script |
 | `JOBSEARCH_RECIPIENT_EMAIL` | yes | secret | Where the report gets sent — never hard-coded |
+| `ADZUNA_SEARCH_TERMS` | no | env | Override the target-role-derived default search terms |
+| `ADZUNA_MAX_DAYS_OLD` | no | env | Adzuna-side recency filter (default 4, matches `RECENCY_DAYS`) |
+| `ADZUNA_RESULTS_PER_PAGE` | no | env | Results per search term (default 25 — keep modest, see quota math) |
+| `ADZUNA_ENRICH` | no | env | Enable/disable Greenhouse/Lever enrichment (default true) |
+| `ADZUNA_ENRICHMENT_MAX_COMPANIES` | no | env | Cap on companies enriched per run (default 20) |
 | `GMAIL_TOKEN_URI` | no | env | Override the OAuth token endpoint (default is Google's) |
 | `JOBSEARCH_SENDER_EMAIL` | no | secret (optional) | "From" header override (must be a verified alias on the sending account) |
 | `JOBSEARCH_EMAIL_SUBJECT_PREFIX` | no | env | Prepended to every subject line, e.g. `"[JobBot] "` |
-| `GREENHOUSE_BOARDS` / `LEVER_COMPANIES` | no | env | One-off override of `config/boards.json` — leave unset in CI |
+| `GREENHOUSE_BOARDS` / `LEVER_COMPANIES` | no | env | Optional direct-watch override of `config/boards.json` — leave unset in CI |
 | `BOARDS_CONFIG_PATH` | no | env | Override the boards-file path (default `config/boards.json`) |
 | `RECENCY_DAYS`, `HARD_EXCLUDE_EXPERIENCE_YEARS`, `CANDIDATE_EXPERIENCE_YEARS`, `RESULTS_LIMIT`, `SEEN_STORE_PATH`, `LOG_LEVEL` | no | env | Core engine tuning — see `.env.example` |
 
+\* Without `ADZUNA_APP_ID`/`ADZUNA_APP_KEY`, discovery is simply disabled
+(logged, not a crash) — the system falls back to direct-watch only
+(`config/boards.json`), which defeats the "no company list to maintain"
+goal. The GitHub Actions workflow treats these as required and fails
+clearly if either is missing, since discovery is the whole point of the
+automation; the underlying library code degrades gracefully for other
+use cases (e.g. local testing with only Greenhouse/Lever configured).
+
 **Locally**, all of these go in `.env` (gitignored).
 
-**In GitHub Actions**, the four marked "secret" above must be
+**In GitHub Actions**, the seven variables marked "secret" above (six
+required plus the optional `JOBSEARCH_SENDER_EMAIL`) must be
 **repository secrets** (Settings → Secrets and variables → Actions →
 "New repository secret"), never repository *variables* and never
 committed anywhere. The workflow references them as `${{ secrets.X }}`.
@@ -241,7 +331,11 @@ Missing any required variable raises a clear, specific
 missing — both locally and in the Actions log — rather than a confusing
 stack trace or silent no-op.
 
-## Adding and removing Greenhouse/Lever companies
+## Adding and removing direct-watch Greenhouse/Lever companies (optional)
+
+This is **not required** — Adzuna discovery (above) works with an empty
+`config/boards.json`. Use this only if you want to *always* watch a
+specific company regardless of whether Adzuna happens to surface it.
 
 Edit `job-search-engine/config/boards.json` — no code changes, no
 workflow changes, just commit the edit:
@@ -333,11 +427,12 @@ firings.
 |---|---|
 | `GmailAuthConfigError: Missing required...` | One of `GMAIL_CLIENT_ID`/`GMAIL_CLIENT_SECRET`/`GMAIL_REFRESH_TOKEN` isn't set. Locally: check `.env` and that you `export`ed it. In Actions: check the repository secret exists and is spelled exactly right. |
 | `EmailConfigError: JOBSEARCH_RECIPIENT_EMAIL is not set` | Same idea — set that secret/env var. |
+| Log says "ADZUNA_APP_ID/ADZUNA_APP_KEY not configured - job discovery is disabled" | Expected if you haven't set them — the run falls back to direct-watch only (`config/boards.json`), which is usually not what you want. Sign up free at developer.adzuna.com and set both. |
 | Gmail send fails with an auth error | The refresh token may have been revoked (password change, manual revocation at myaccount.google.com/permissions, or the OAuth consent screen falling out of "Testing" test-user list). Re-run `scripts/get_gmail_refresh_token.py` and update the secret. |
 | Workflow runs but does nothing (no error) | Check the "Check scheduled run time" step's log — if the current `America/New_York` hour wasn't 08 or 20, that's by design (see DST handling above). Use `workflow_dispatch` to force a real run regardless of time. |
 | Same jobs emailed twice | Check whether `data/seen_jobs.json` actually got committed after the previous run (look at the "Commit updated seen-job state" step) — if that step didn't run (e.g. the email step failed), the previous run's jobs were correctly *not* marked seen and will legitimately reappear until a send succeeds. |
 | Workflow can't push the updated seen-job file | Confirm `permissions: contents: write` is present in the workflow (it fails clearly with a permissions error otherwise) and that branch protection rules (if any) allow the `GITHUB_TOKEN` to push directly. |
-| Local `python3 -m jobsearch.orchestrator` does nothing / finds 0 jobs | Check `config/boards.json` has real board/company slugs, and that those companies actually have current postings — an empty result with no error is often just "no matches right now." |
+| Local `python3 -m jobsearch.orchestrator` finds 0 new jobs | First check `ADZUNA_APP_ID`/`ADZUNA_APP_KEY` are set (discovery is silently disabled without them — see the row above). If they are set, an empty result with no error is often legitimately "no matches right now" for your target roles within the recency window; also check `config/boards.json` if you're relying on direct-watch for a specific company. |
 | `pip install -e ".[dev]"` fails | Confirm you're on Python 3.12+ (`python3 --version`) and inside an activated virtualenv. |
 
 ## Running the tests
@@ -392,7 +487,19 @@ jobs were found" email and marks nothing as seen — nothing is fabricated.
 
 ## Known limitations (current scope)
 
-- Only Greenhouse and Lever are implemented.
+- **Adzuna does not provide complete coverage of the US job market.** It's
+  one free aggregator among several; a company that only posts to its own
+  Greenhouse/Lever board (and isn't picked up by Adzuna's own indexing)
+  can be missed entirely. Direct-watch (`config/boards.json`) is the
+  mitigation for a specific known gap, not a general fix.
+- **Greenhouse/Lever enrichment is a heuristic, best-effort guess.**
+  Slug-guessing from a company's display name won't always resolve
+  (many real slugs aren't derivable from the name Adzuna shows), and even
+  when a board is found, only an exact title match after normalization
+  is trusted — a real but differently-worded posting at that same company
+  won't be enriched. Neither failure mode drops the job; it just stays
+  exactly as Adzuna reported it.
+- Only Greenhouse and Lever are supported for direct-watch/enrichment.
 - Experience-requirement and sponsorship detection are regex/heuristic —
   treat as a first pass, not ground truth.
 - The DST-handling approach (four cron entries + a runtime hour guard)
@@ -400,14 +507,15 @@ jobs were found" email and marks nothing as seen — nothing is fabricated.
   work twice — the no-op runs are cheap and fast but do consume a small
   amount of Actions minutes/log noise.
 - This sandbox's outbound network is restricted to a small domain
-  allowlist that doesn't include the ATS APIs or Google's OAuth/Gmail
-  endpoints, so live fetching and live email sending couldn't be
-  re-verified end-to-end from inside this environment on this pass —
-  both were previously confirmed working from the user's own machine
-  (a live Stripe fetch, and a real Gmail send that arrived in the inbox),
-  and everything here is covered by mocked unit/integration tests.
+  allowlist that doesn't include the ATS APIs, Adzuna, or Google's
+  OAuth/Gmail endpoints, so live fetching/discovery/email sending
+  couldn't be re-verified end-to-end from inside this environment on this
+  pass — Greenhouse fetching and Gmail sending were both previously
+  confirmed working from the user's own machine, and everything here
+  (including Adzuna and enrichment) is covered by mocked unit/integration
+  tests.
 - The orchestrator and workflow have not yet been exercised inside actual
-  GitHub Actions infrastructure (only YAML-structure-validated and
-  locally dry-run with the real modules) — the first real scheduled or
-  manually-dispatched run in GitHub Actions is the remaining
-  end-to-end check.
+  GitHub Actions infrastructure with the new Adzuna discovery layer
+  specifically — the earlier Gmail-only version was confirmed working in
+  real GitHub Actions; a fresh manually-dispatched run after this change
+  is the remaining end-to-end check.

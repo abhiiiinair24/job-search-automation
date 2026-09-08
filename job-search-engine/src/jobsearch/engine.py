@@ -16,6 +16,7 @@ from jobsearch.models import Job
 from jobsearch.profile import CandidateProfile, default_profile
 from jobsearch.ranking import RankingWeights, rank_jobs
 from jobsearch.seen_store import SeenJobStore
+from jobsearch.sources.adzuna import AdzunaDiscoverySource
 from jobsearch.sources.base import JobSource
 from jobsearch.sources.greenhouse import GreenhouseJobSource
 from jobsearch.sources.lever import LeverJobSource
@@ -23,13 +24,49 @@ from jobsearch.sources.lever import LeverJobSource
 logger = logging.getLogger(__name__)
 
 
-def build_sources(config: Config) -> List[JobSource]:
-    """Construct one JobSource per configured Greenhouse board / Lever company."""
+def build_sources(config: Config, profile: Optional[CandidateProfile] = None) -> List[JobSource]:
+    """Construct every configured job source.
+
+    Adzuna (the primary discovery mechanism) is added whenever
+    ADZUNA_APP_ID/ADZUNA_APP_KEY are configured — search terms default to
+    the candidate profile's target roles unless config.adzuna_search_terms
+    overrides them. Greenhouse/Lever direct-watch entries (from
+    config/boards.json, optional) are added exactly as before — discovery
+    and direct-watch are additive, not exclusive.
+    """
     sources: List[JobSource] = []
+
     for board in config.greenhouse_boards:
         sources.append(GreenhouseJobSource(board_token=board))
     for company in config.lever_companies:
         sources.append(LeverJobSource(company_slug=company))
+
+    if config.adzuna_app_id and config.adzuna_app_key:
+        search_terms = config.adzuna_search_terms
+        if not search_terms:
+            profile = profile or default_profile(years_of_experience=config.candidate_experience_years)
+            search_terms = list(profile.target_roles.keys())
+
+        if search_terms:
+            sources.append(
+                AdzunaDiscoverySource(
+                    app_id=config.adzuna_app_id,
+                    app_key=config.adzuna_app_key,
+                    search_terms=search_terms,
+                    max_days_old=config.adzuna_max_days_old,
+                    results_per_page=config.adzuna_results_per_page,
+                    enrich=config.adzuna_enrich,
+                    enrichment_max_companies=config.adzuna_enrichment_max_companies,
+                )
+            )
+        else:
+            logger.warning("Adzuna credentials configured but no search terms available; skipping.")
+    else:
+        logger.warning(
+            "ADZUNA_APP_ID/ADZUNA_APP_KEY not configured - job discovery is disabled; "
+            "only direct-watch sources (config/boards.json) will be used, if any."
+        )
+
     return sources
 
 
@@ -67,7 +104,8 @@ def run_search(
     (see SearchResult.new_jobs / already_seen_jobs) using a SeenJobStore.
     This is purely additive — passing None preserves prior behavior.
     """
-    sources = sources if sources is not None else build_sources(config)
+    profile = profile or default_profile(years_of_experience=config.candidate_experience_years)
+    sources = sources if sources is not None else build_sources(config, profile=profile)
 
     all_jobs: List[Job] = []
     failed_sources: List[str] = []
@@ -98,7 +136,6 @@ def run_search(
 
         filtered.append(job)
 
-    profile = profile or default_profile(years_of_experience=config.candidate_experience_years)
     weights = RankingWeights(profile=profile)
     ranked = rank_jobs(filtered, weights=weights)
 

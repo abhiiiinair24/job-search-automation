@@ -61,3 +61,53 @@ def test_from_env_other_settings_unaffected_by_boards_source(monkeypatch, tmp_pa
 
     assert config.recency_days == 7
     assert config.candidate_experience_years == 5.0
+
+
+# --- Adzuna discovery settings ------------------------------------------------
+
+
+def test_from_env_adzuna_credentials_default_to_none(monkeypatch):
+    monkeypatch.delenv("ADZUNA_APP_ID", raising=False)
+    monkeypatch.delenv("ADZUNA_APP_KEY", raising=False)
+    config = Config.from_env()
+    assert config.adzuna_app_id is None
+    assert config.adzuna_app_key is None
+
+
+def test_from_env_adzuna_credentials_picked_up(monkeypatch):
+    monkeypatch.setenv("ADZUNA_APP_ID", "my-app-id")
+    monkeypatch.setenv("ADZUNA_APP_KEY", "my-app-key")
+    config = Config.from_env()
+    assert config.adzuna_app_id == "my-app-id"
+    assert config.adzuna_app_key == "my-app-key"
+
+
+def test_from_env_adzuna_search_terms_empty_by_default(monkeypatch):
+    monkeypatch.delenv("ADZUNA_SEARCH_TERMS", raising=False)
+    config = Config.from_env()
+    assert config.adzuna_search_terms == []
+
+
+def test_from_env_adzuna_search_terms_parsed_from_csv(monkeypatch):
+    monkeypatch.setenv("ADZUNA_SEARCH_TERMS", "ai/ml engineer, backend engineer")
+    config = Config.from_env()
+    assert config.adzuna_search_terms == ["ai/ml engineer", "backend engineer"]
+
+
+def test_from_env_adzuna_tunables_have_sane_defaults(monkeypatch):
+    for var in [
+        "ADZUNA_MAX_DAYS_OLD", "ADZUNA_RESULTS_PER_PAGE",
+        "ADZUNA_ENRICH", "ADZUNA_ENRICHMENT_MAX_COMPANIES",
+    ]:
+        monkeypatch.delenv(var, raising=False)
+    config = Config.from_env()
+    assert config.adzuna_max_days_old == 4
+    assert config.adzuna_results_per_page == 25
+    assert config.adzuna_enrich is True
+    assert config.adzuna_enrichment_max_companies == 20
+
+
+def test_from_env_adzuna_enrich_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("ADZUNA_ENRICH", "false")
+    config = Config.from_env()
+    assert config.adzuna_enrich is False

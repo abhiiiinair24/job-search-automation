@@ -19,6 +19,7 @@ class SponsorshipStatus(str, Enum):
 class SourceType(str, Enum):
     GREENHOUSE = "greenhouse"
     LEVER = "lever"
+    ADZUNA = "adzuna"
 
 
 @dataclass

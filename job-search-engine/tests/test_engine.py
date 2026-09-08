@@ -1,12 +1,16 @@
 from datetime import datetime, timedelta, timezone
 from typing import List
+from unittest.mock import patch
 
 from jobsearch.config import Config
-from jobsearch.engine import run_search
+from jobsearch.engine import build_sources, run_search
 from jobsearch.models import Job, SourceType
-from jobsearch.profile import CandidateProfile
+from jobsearch.profile import CandidateProfile, default_profile
 from jobsearch.seen_store import InMemorySeenJobStore
+from jobsearch.sources.adzuna import AdzunaDiscoverySource
 from jobsearch.sources.base import JobSource, JobSourceError
+from jobsearch.sources.greenhouse import GreenhouseJobSource
+from jobsearch.sources.lever import LeverJobSource
 
 
 class FakeSource(JobSource):
@@ -207,3 +211,121 @@ def test_run_search_does_not_mutate_seen_store_by_itself():
     # run_search only reads from the store; marking-as-seen is a separate,
     # explicit step a caller performs after acting on the results.
     assert seen_store.get_seen_ids() == set()
+
+
+# --- build_sources: Adzuna discovery wiring ----------------------------------
+
+
+def test_build_sources_includes_adzuna_when_credentials_present():
+    config = Config(adzuna_app_id="id", adzuna_app_key="key", adzuna_search_terms=["backend engineer"])
+    sources = build_sources(config)
+    adzuna_sources = [s for s in sources if isinstance(s, AdzunaDiscoverySource)]
+    assert len(adzuna_sources) == 1
+
+
+def test_build_sources_skips_adzuna_when_credentials_absent():
+    config = Config(adzuna_app_id=None, adzuna_app_key=None)
+    sources = build_sources(config)
+    assert not any(isinstance(s, AdzunaDiscoverySource) for s in sources)
+
+
+def test_build_sources_skips_adzuna_when_only_one_credential_present():
+    config = Config(adzuna_app_id="id", adzuna_app_key=None)
+    sources = build_sources(config)
+    assert not any(isinstance(s, AdzunaDiscoverySource) for s in sources)
+
+
+def test_build_sources_uses_explicit_search_terms_when_configured():
+    config = Config(
+        adzuna_app_id="id", adzuna_app_key="key", adzuna_search_terms=["custom role"]
+    )
+    sources = build_sources(config)
+    adzuna_source = next(s for s in sources if isinstance(s, AdzunaDiscoverySource))
+    assert adzuna_source.search_terms == ["custom role"]
+
+
+def test_build_sources_derives_search_terms_from_profile_when_unset():
+    config = Config(adzuna_app_id="id", adzuna_app_key="key", adzuna_search_terms=[])
+    profile = CandidateProfile(
+        years_of_experience=4.0,
+        skills={},
+        target_roles={"ai/ml engineer": 3.0, "backend engineer": 2.0},
+        domain_experience=[],
+        projects=[],
+    )
+    sources = build_sources(config, profile=profile)
+    adzuna_source = next(s for s in sources if isinstance(s, AdzunaDiscoverySource))
+    assert set(adzuna_source.search_terms) == {"ai/ml engineer", "backend engineer"}
+
+
+def test_build_sources_derives_search_terms_from_default_profile_when_no_profile_given():
+    config = Config(adzuna_app_id="id", adzuna_app_key="key", adzuna_search_terms=[])
+    sources = build_sources(config)  # no profile passed
+    adzuna_source = next(s for s in sources if isinstance(s, AdzunaDiscoverySource))
+    expected_terms = set(default_profile().target_roles.keys())
+    assert set(adzuna_source.search_terms) == expected_terms
+
+
+def test_build_sources_still_includes_greenhouse_and_lever_direct_watch():
+    config = Config(
+        greenhouse_boards=["stripe"],
+        lever_companies=["netflix"],
+        adzuna_app_id="id",
+        adzuna_app_key="key",
+        adzuna_search_terms=["backend engineer"],
+    )
+    sources = build_sources(config)
+    assert any(isinstance(s, GreenhouseJobSource) for s in sources)
+    assert any(isinstance(s, LeverJobSource) for s in sources)
+    assert any(isinstance(s, AdzunaDiscoverySource) for s in sources)
+
+
+def test_build_sources_greenhouse_lever_work_standalone_without_adzuna():
+    # Direct-watch must keep working even with zero Adzuna configuration -
+    # discovery and direct-watch are independent, not coupled.
+    config = Config(greenhouse_boards=["stripe"], adzuna_app_id=None, adzuna_app_key=None)
+    sources = build_sources(config)
+    assert len(sources) == 1
+    assert isinstance(sources[0], GreenhouseJobSource)
+
+
+def test_build_sources_passes_adzuna_tuning_config_through():
+    config = Config(
+        adzuna_app_id="id",
+        adzuna_app_key="key",
+        adzuna_search_terms=["backend engineer"],
+        adzuna_max_days_old=7,
+        adzuna_results_per_page=10,
+        adzuna_enrich=False,
+        adzuna_enrichment_max_companies=5,
+    )
+    sources = build_sources(config)
+    adzuna_source = next(s for s in sources if isinstance(s, AdzunaDiscoverySource))
+    assert adzuna_source.max_days_old == 7
+    assert adzuna_source.results_per_page == 10
+    assert adzuna_source.enrich is False
+    assert adzuna_source.enrichment_max_companies == 5
+
+
+def test_run_search_end_to_end_with_mocked_adzuna_source():
+    now = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    adzuna_job = Job(
+        source=SourceType.ADZUNA,
+        source_job_id="1",
+        company="DiscoveredCo",
+        title="AI/ML Engineer",
+        location="Buffalo, NY",
+        url="https://adzuna.example/redirect/1",
+        description="RAG, LangChain, PyTorch. 3-5 years.",
+        date_posted=now - timedelta(days=1),
+        date_updated=now - timedelta(days=1),
+    )
+
+    with patch.object(AdzunaDiscoverySource, "fetch_jobs", return_value=[adzuna_job]):
+        adzuna_source = AdzunaDiscoverySource(
+            app_id="id", app_key="key", search_terms=["ai/ml engineer"]
+        )
+        result = run_search(Config(), sources=[adzuna_source], reference_time=now)
+
+    assert len(result.jobs) == 1
+    assert result.jobs[0].company == "DiscoveredCo"

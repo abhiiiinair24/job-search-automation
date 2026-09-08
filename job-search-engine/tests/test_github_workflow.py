@@ -136,6 +136,23 @@ def test_workflow_reads_gmail_credentials_from_secrets_only(workflow):
         assert env[key].startswith("${{ secrets.")
 
 
+def test_workflow_reads_adzuna_credentials_from_secrets_only(workflow):
+    steps = workflow["jobs"]["search-and-notify"]["steps"]
+    run_step = next(s for s in steps if s.get("name") == "Run job search and send email")
+    env = run_step["env"]
+    for key in ("ADZUNA_APP_ID", "ADZUNA_APP_KEY"):
+        assert key in env
+        assert env[key].startswith("${{ secrets.")
+
+
+def test_workflow_checks_adzuna_secrets_are_required(workflow):
+    steps = workflow["jobs"]["search-and-notify"]["steps"]
+    verify_step = next(s for s in steps if "secret" in s.get("name", "").lower())
+    run_script = verify_step["run"]
+    assert "ADZUNA_APP_ID" in run_script
+    assert "ADZUNA_APP_KEY" in run_script
+
+
 def test_workflow_runs_the_orchestrator_not_duplicated_logic(workflow):
     steps = workflow["jobs"]["search-and-notify"]["steps"]
     run_step = next(s for s in steps if s.get("name") == "Run job search and send email")
