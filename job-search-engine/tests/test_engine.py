@@ -329,3 +329,62 @@ def test_run_search_end_to_end_with_mocked_adzuna_source():
 
     assert len(result.jobs) == 1
     assert result.jobs[0].company == "DiscoveredCo"
+
+
+# --- regression: Adzuna US-location false negatives ("City, County" format) -
+
+
+def test_run_search_accepts_real_adzuna_county_style_us_locations():
+    # Real location strings observed from Adzuna's live US index - these
+    # use "City, County" rather than "City, ST", which the free-text
+    # is_us_based() heuristic (built for Greenhouse/Lever) cannot parse.
+    # Adzuna jobs must bypass that heuristic since the source itself is
+    # already US-scoped (/v1/api/jobs/us/search).
+    now = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    real_adzuna_locations = [
+        "Watkins, Aurora",
+        "King of Prussia, Montgomery County",
+        "Tampa, Hillsborough County",
+        "South San Francisco, San Mateo County",
+        "Jersey City, Hudson County",
+        "Washington, Washington, D.C.",
+        "Ny State Campus, Albany County",
+    ]
+    jobs = [
+        _job(str(i), "Backend Engineer", "3-5 years. Python.", location=loc, days_ago=1, now=now)
+        for i, loc in enumerate(real_adzuna_locations)
+    ]
+    for job in jobs:
+        job.source = SourceType.ADZUNA
+
+    result = run_search(Config(), sources=[FakeSource("fake", jobs)], reference_time=now)
+
+    assert len(result.jobs) == len(real_adzuna_locations)
+
+
+def test_run_search_still_filters_non_us_greenhouse_locations():
+    # Regression guard: the Adzuna bypass must NOT weaken filtering for
+    # Greenhouse/Lever jobs, which can legitimately span countries.
+    now = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    us_job = _job("1", "Backend Engineer", "3-5 years.", location="Austin, TX", days_ago=1, now=now)
+    non_us_job = _job("2", "Backend Engineer", "3-5 years.", location="London, UK", days_ago=1, now=now)
+    # both default to SourceType.GREENHOUSE via the _job() helper
+
+    result = run_search(Config(), sources=[FakeSource("fake", [us_job, non_us_job])], reference_time=now)
+
+    assert len(result.jobs) == 1
+    assert result.jobs[0].location == "Austin, TX"
+
+
+def test_run_search_filters_non_us_adzuna_location_with_explicit_country():
+    # Even though Adzuna jobs bypass the heuristic, this confirms the
+    # bypass is keyed on job.source == ADZUNA specifically, not applied
+    # blanket to everything - a non-Adzuna source with a non-US location
+    # (here relabeled as LEVER) is still correctly filtered out.
+    now = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    job = _job("1", "Backend Engineer", "3-5 years.", location="London, UK", days_ago=1, now=now)
+    job.source = SourceType.LEVER
+
+    result = run_search(Config(), sources=[FakeSource("fake", [job])], reference_time=now)
+
+    assert result.jobs == []

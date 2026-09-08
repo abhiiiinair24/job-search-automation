@@ -12,7 +12,7 @@ from jobsearch.filters.experience import annotate_experience, passes_experience_
 from jobsearch.filters.location import is_us_based
 from jobsearch.filters.recency import is_recent
 from jobsearch.filters.sponsorship import annotate_sponsorship
-from jobsearch.models import Job
+from jobsearch.models import Job, SourceType
 from jobsearch.profile import CandidateProfile, default_profile
 from jobsearch.ranking import RankingWeights, rank_jobs
 from jobsearch.seen_store import SeenJobStore
@@ -127,7 +127,15 @@ def run_search(
         annotate_experience(job)
         annotate_sponsorship(job)
 
-        if not is_us_based(job):
+        # Adzuna jobs are already US-scoped by the source itself (its
+        # /v1/api/jobs/us/search endpoint), so the free-text is_us_based()
+        # heuristic is skipped for them - it was built for Greenhouse/Lever
+        # location strings ("City, ST") and doesn't reliably parse Adzuna's
+        # US format ("City, County", e.g. "Tampa, Hillsborough County"),
+        # which caused false negatives dropping nearly all Adzuna results.
+        # Greenhouse/Lever jobs (which can span multiple countries) still
+        # go through the heuristic exactly as before.
+        if job.source != SourceType.ADZUNA and not is_us_based(job):
             continue
         if not is_recent(job, reference_time=reference_time, max_age_days=config.recency_days):
             continue
