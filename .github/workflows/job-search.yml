@@ -1,0 +1,120 @@
+# Runs the job-search engine, emails new matches via Gmail, and persists
+# seen-job state back to the repo.
+#
+# IMPORTANT: this file must live at the REPOSITORY ROOT
+# (.github/workflows/job-search.yml) — NOT inside job-search-engine/. The
+# `working-directory` on each step below assumes the actual Python package
+# lives in a `job-search-engine/` subfolder of this repo; adjust that path
+# if your layout differs.
+#
+# See job-search-engine/README.md ("GitHub Actions considerations") for
+# the full explanation of the design decisions below, especially the
+# timezone/DST handling and the send-then-mark-seen ordering.
+
+name: Job Search
+
+on:
+  schedule:
+    # GitHub Actions cron runs in UTC only and has no timezone support, so
+    # 8:00 AM / 8:00 PM America/New_York is scheduled at BOTH of its
+    # possible UTC offsets (EDT = UTC-4, roughly Mar-Nov; EST = UTC-5,
+    # roughly Nov-Mar). The "Check scheduled run time" step below inspects
+    # the actual current America/New_York clock time at runtime and skips
+    # the rest of the job unless it's really 8am or 8pm locally — so only
+    # ONE of these four cron firings per day actually does anything; the
+    # other silently no-ops. This avoids hard-coding a DST cutover date
+    # that would need yearly maintenance.
+    - cron: '0 12 * * *'  # ~8:00 AM ET (EDT, UTC-4)
+    - cron: '0 13 * * *'  # ~8:00 AM ET (EST, UTC-5)
+    - cron: '0 0 * * *'   # ~8:00 PM ET (EDT, UTC-4)
+    - cron: '0 1 * * *'   # ~8:00 PM ET (EST, UTC-5)
+  workflow_dispatch: {}   # manual trigger from the Actions tab, for testing
+
+permissions:
+  contents: write  # only permission needed: committing data/seen_jobs.json
+
+# Prevent overlapping runs from stepping on each other's seen-job commits
+# (e.g. a manual dispatch firing while a scheduled run is still in flight).
+concurrency:
+  group: job-search-scheduled-run
+  cancel-in-progress: false
+
+jobs:
+  search-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check scheduled run time (DST-safe local-time guard)
+        id: time_check
+        run: |
+          hour=$(TZ="America/New_York" date +%H)
+          echo "Current America/New_York hour: $hour"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger - running regardless of time."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$hour" = "08" ] || [ "$hour" = "20" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Not a scheduled run hour in America/New_York (got $hour) - skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        if: steps.time_check.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        if: steps.time_check.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install job-search-engine
+        if: steps.time_check.outputs.run == 'true'
+        working-directory: job-search-engine
+        run: pip install -e .
+
+      - name: Verify required secrets are present
+        if: steps.time_check.outputs.run == 'true'
+        run: |
+          missing=""
+          [ -z "${{ secrets.GMAIL_CLIENT_ID }}" ] && missing="$missing GMAIL_CLIENT_ID"
+          [ -z "${{ secrets.GMAIL_CLIENT_SECRET }}" ] && missing="$missing GMAIL_CLIENT_SECRET"
+          [ -z "${{ secrets.GMAIL_REFRESH_TOKEN }}" ] && missing="$missing GMAIL_REFRESH_TOKEN"
+          [ -z "${{ secrets.JOBSEARCH_RECIPIENT_EMAIL }}" ] && missing="$missing JOBSEARCH_RECIPIENT_EMAIL"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required repository secret(s):$missing"
+            echo "Configure these under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          echo "All required secrets are present."
+
+      - name: Run job search and send email
+        if: steps.time_check.outputs.run == 'true'
+        working-directory: job-search-engine
+        env:
+          # Board/company list intentionally NOT set here - it's read from
+          # the committed config/boards.json by default (see README "How
+          # to add/remove companies"). Set GREENHOUSE_BOARDS/LEVER_COMPANIES
+          # here only if you want to override that file for a specific run.
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          JOBSEARCH_RECIPIENT_EMAIL: ${{ secrets.JOBSEARCH_RECIPIENT_EMAIL }}
+          JOBSEARCH_SENDER_EMAIL: ${{ secrets.JOBSEARCH_SENDER_EMAIL }}
+          SEEN_STORE_PATH: data/seen_jobs.json
+          LOG_LEVEL: INFO
+        run: python3 -m jobsearch.orchestrator
+
+      - name: Commit updated seen-job state
+        if: steps.time_check.outputs.run == 'true'
+        working-directory: job-search-engine
+        run: |
+          if [ -n "$(git status --porcelain data/seen_jobs.json 2>/dev/null)" ]; then
+            git config user.name "job-search-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add data/seen_jobs.json
+            git commit -m "Update seen-job state [skip ci]"
+            git push
+          else
+            echo "No changes to seen-job state; nothing to commit."
+          fi

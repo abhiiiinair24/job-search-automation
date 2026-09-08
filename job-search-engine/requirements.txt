@@ -4,3 +4,4 @@ google-api-python-client>=2.100
 google-auth-httplib2>=0.2
 pytest>=8.0
 pytest-cov>=5.0
+pyyaml>=6.0

@@ -1,6 +1,8 @@
 import json
 
-from jobsearch.seen_store import InMemorySeenJobStore, JsonFileSeenJobStore
+import pytest
+
+from jobsearch.seen_store import InMemorySeenJobStore, JsonFileSeenJobStore, SeenJobStoreWriteError
 
 
 # --- InMemorySeenJobStore --------------------------------------------------
@@ -117,3 +119,18 @@ def test_json_store_accepts_string_path(tmp_path):
     store = JsonFileSeenJobStore(path=path_str)
     store.mark_seen(["job-1"])
     assert store.get_seen_ids() == {"job-1"}
+
+
+def test_json_store_mark_seen_raises_on_write_failure(tmp_path):
+    # Point the store at a path where the parent is actually a file, not a
+    # directory, so mkdir/open will fail - simulating a disk/permission
+    # problem. Write failures must NOT be swallowed (unlike read failures),
+    # since silently failing to persist "seen" state would cause the same
+    # jobs to be re-emailed on every subsequent run.
+    blocking_file = tmp_path / "not_a_directory"
+    blocking_file.write_text("i am a file, not a directory")
+    bad_path = blocking_file / "seen.json"
+
+    store = JsonFileSeenJobStore(path=bad_path)
+    with pytest.raises(SeenJobStoreWriteError):
+        store.mark_seen(["job-1"])

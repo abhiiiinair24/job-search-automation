@@ -22,6 +22,17 @@ from typing import Iterable, List, Set, Union
 logger = logging.getLogger(__name__)
 
 
+class SeenJobStoreWriteError(Exception):
+    """Raised when persisting seen-job state to disk fails.
+
+    Unlike read failures (treated leniently as "nothing seen yet" so a
+    damaged/missing file never blocks a run), a WRITE failure is not safe
+    to swallow: silently failing to persist "seen" state would cause the
+    same jobs to be re-emailed on every subsequent run. Callers (e.g. the
+    orchestrator) should let this propagate and fail the run clearly.
+    """
+
+
 class SeenJobStore(ABC):
     """Common interface for tracking which job stable_ids have been seen before."""
 
@@ -83,9 +94,11 @@ class JsonFileSeenJobStore(SeenJobStore):
     def mark_seen(self, job_ids: Iterable[str]) -> None:
         current = self.get_seen_ids()
         current.update(job_ids)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("w", encoding="utf-8") as f:
                 json.dump(sorted(current), f, indent=2)
         except OSError as exc:
-            logger.error("Could not write seen-job store at %s: %s", self.path, exc)
+            raise SeenJobStoreWriteError(
+                f"Could not write seen-job store at {self.path}: {exc}"
+            ) from exc

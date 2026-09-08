@@ -1,10 +1,16 @@
 """Environment-driven configuration.
 
-No secrets are needed by the current (core-engine-only) scope, but this
-module is where any future API keys/tokens would be read from — always via
-environment variables, never hard-coded or committed. Copy .env.example to
-.env locally and export those variables (or load them with a tool like
-python-dotenv/direnv) before running the CLI.
+Board/company lists are the one exception: those come from a plain
+editable file (config/boards.json, see jobsearch.boards_config) rather
+than an environment variable, so they can be changed without touching any
+CI workflow YAML. GREENHOUSE_BOARDS/LEVER_COMPANIES env vars still work
+and take precedence when set — handy for a quick local override — but the
+boards file is what a scheduled run actually reads by default.
+
+Everything else here is read from environment variables, never
+hard-coded. Copy .env.example to .env locally and export those variables
+(or load them with a tool like python-dotenv/direnv) before running the
+CLI.
 """
 from __future__ import annotations
 
@@ -12,6 +18,8 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+from jobsearch.boards_config import DEFAULT_BOARDS_CONFIG_PATH, BoardsConfig
 
 
 def _split_csv(value: Optional[str]) -> List[str]:
@@ -29,16 +37,26 @@ class Config:
     candidate_experience_years: float = 4.0
     log_level: str = "INFO"
     results_limit: int = 15
-    # Where JsonFileSeenJobStore persists stable job ids between runs. Not
-    # wired into the CLI yet (no scheduler exists), but configurable now so
-    # a future scheduled run can point it somewhere durable.
+    # Where JsonFileSeenJobStore persists stable job ids between runs.
     seen_store_path: str = "data/seen_jobs.json"
 
     @classmethod
     def from_env(cls) -> "Config":
+        env_greenhouse = _split_csv(os.environ.get("GREENHOUSE_BOARDS"))
+        env_lever = _split_csv(os.environ.get("LEVER_COMPANIES"))
+
+        if env_greenhouse or env_lever:
+            # Explicit env vars set (e.g. for a quick local override) win
+            # outright, even if the boards file also has entries.
+            greenhouse_boards, lever_companies = env_greenhouse, env_lever
+        else:
+            boards_config_path = os.environ.get("BOARDS_CONFIG_PATH", DEFAULT_BOARDS_CONFIG_PATH)
+            boards = BoardsConfig.from_file(boards_config_path)
+            greenhouse_boards, lever_companies = boards.greenhouse_boards, boards.lever_companies
+
         return cls(
-            greenhouse_boards=_split_csv(os.environ.get("GREENHOUSE_BOARDS")),
-            lever_companies=_split_csv(os.environ.get("LEVER_COMPANIES")),
+            greenhouse_boards=greenhouse_boards,
+            lever_companies=lever_companies,
             recency_days=int(os.environ.get("RECENCY_DAYS", "4")),
             hard_exclude_experience_years=int(
                 os.environ.get("HARD_EXCLUDE_EXPERIENCE_YEARS", "6")
@@ -57,3 +75,4 @@ def configure_logging(level: str = "INFO") -> None:
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
