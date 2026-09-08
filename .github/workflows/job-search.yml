@@ -20,14 +20,23 @@ on:
     # possible UTC offsets (EDT = UTC-4, roughly Mar-Nov; EST = UTC-5,
     # roughly Nov-Mar). The "Check scheduled run time" step below inspects
     # the actual current America/New_York clock time at runtime and skips
-    # the rest of the job unless it's really 8am or 8pm locally — so only
-    # ONE of these four cron firings per day actually does anything; the
-    # other silently no-ops. This avoids hard-coding a DST cutover date
-    # that would need yearly maintenance.
-    - cron: '0 12 * * *'  # ~8:00 AM ET (EDT, UTC-4)
-    - cron: '0 13 * * *'  # ~8:00 AM ET (EST, UTC-5)
-    - cron: '0 0 * * *'   # ~8:00 PM ET (EDT, UTC-4)
-    - cron: '0 1 * * *'   # ~8:00 PM ET (EST, UTC-5)
+    # the rest of the job unless it's within TOLERANCE_MINUTES of 8am/8pm
+    # locally — so only ONE of these four cron firings per day actually
+    # does anything; the other silently no-ops. This avoids hard-coding a
+    # DST cutover date that would need yearly maintenance.
+    #
+    # Minute offset (:07, not :00): GitHub's own guidance is that jobs
+    # scheduled exactly on the hour face the most queue contention across
+    # the whole platform (everyone else's cron jobs fire then too), which
+    # increases the odds of a delayed run. An off-the-hour minute reduces
+    # that contention. This does not guarantee on-time execution — GitHub
+    # documents that scheduled workflows can still be delayed, occasionally
+    # by a lot, during periods of high platform load — see the tolerance
+    # window note below for how far this can absorb.
+    - cron: '7 12 * * *'  # ~8:00 AM ET (EDT, UTC-4)
+    - cron: '7 13 * * *'  # ~8:00 AM ET (EST, UTC-5)
+    - cron: '7 0 * * *'   # ~8:00 PM ET (EDT, UTC-4)
+    - cron: '7 1 * * *'   # ~8:00 PM ET (EST, UTC-5)
   workflow_dispatch: {}   # manual trigger from the Actions tab, for testing
 
 permissions:
@@ -46,15 +55,38 @@ jobs:
       - name: Check scheduled run time (DST-safe local-time guard)
         id: time_check
         run: |
+          # Minute-precision check (not just an hour string match) so a
+          # scheduling delay from GitHub still counts as "on time," up to
+          # TOLERANCE_MINUTES. This must stay comfortably under 60 - the
+          # OTHER (wrong-season) cron entry's target is exactly 60 minutes
+          # away, and a tolerance at or above that would risk both entries
+          # firing for the same real-world window, sending two emails.
+          # 45 keeps meaningful headroom below that 60-minute ceiling.
+          TOLERANCE_MINUTES=45
+
           hour=$(TZ="America/New_York" date +%H)
-          echo "Current America/New_York hour: $hour"
+          minute=$(TZ="America/New_York" date +%M)
+          # Strip any leading zero (bash treats "08"/"09" as invalid octal
+          # literals in arithmetic contexts otherwise).
+          hour=$((10#$hour))
+          minute=$((10#$minute))
+          now_total=$((hour * 60 + minute))
+
+          target_am=$((8 * 60))
+          target_pm=$((20 * 60))
+          diff_am=$(( now_total > target_am ? now_total - target_am : target_am - now_total ))
+          diff_pm=$(( now_total > target_pm ? now_total - target_pm : target_pm - now_total ))
+
+          echo "Current America/New_York time: ${hour}:$(printf '%02d' "$minute")"
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Manual trigger - running regardless of time."
             echo "run=true" >> "$GITHUB_OUTPUT"
-          elif [ "$hour" = "08" ] || [ "$hour" = "20" ]; then
+          elif [ "$diff_am" -le "$TOLERANCE_MINUTES" ] || [ "$diff_pm" -le "$TOLERANCE_MINUTES" ]; then
+            echo "Within ${TOLERANCE_MINUTES} minutes of a scheduled run time - running."
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Not a scheduled run hour in America/New_York (got $hour) - skipping."
+            echo "Not within ${TOLERANCE_MINUTES} minutes of 8:00am/8:00pm America/New_York - skipping."
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 

@@ -57,11 +57,11 @@ def test_workflow_schedule_covers_both_dst_offsets_for_8am_and_8pm(workflow):
     triggers = _triggers(workflow)
     crons = {entry["cron"] for entry in triggers["schedule"]}
     # 8:00 AM ET -> 12:00 or 13:00 UTC depending on DST.
-    assert "0 12 * * *" in crons
-    assert "0 13 * * *" in crons
+    assert "7 12 * * *" in crons
+    assert "7 13 * * *" in crons
     # 8:00 PM ET -> 00:00 or 01:00 UTC depending on DST.
-    assert "0 0 * * *" in crons
-    assert "0 1 * * *" in crons
+    assert "7 0 * * *" in crons
+    assert "7 1 * * *" in crons
 
 
 def test_workflow_supports_manual_dispatch(workflow):
@@ -94,6 +94,40 @@ def test_workflow_has_local_time_guard_step_before_everything_else(workflow):
     steps = workflow["jobs"]["search-and-notify"]["steps"]
     assert "America/New_York" in steps[0]["run"]
     assert steps[0]["id"] == "time_check"
+
+
+def test_workflow_guard_uses_tolerance_window_not_exact_hour_match(workflow):
+    # Regression guard: an exact hour-string match (hour == "08") is too
+    # brittle against GitHub's own scheduling delays. The guard must use
+    # a minute-precision tolerance window instead.
+    steps = workflow["jobs"]["search-and-notify"]["steps"]
+    guard_script = steps[0]["run"]
+    assert "TOLERANCE_MINUTES" in guard_script
+    assert 'hour" = "08"' not in guard_script  # the old brittle check
+
+
+def test_workflow_guard_tolerance_stays_safely_under_60_minutes(workflow):
+    # The other (wrong-season) cron entry's target is exactly 60 minutes
+    # away - the tolerance must stay meaningfully under that or both
+    # entries could fire for the same real-world window and double-send.
+    import re
+
+    steps = workflow["jobs"]["search-and-notify"]["steps"]
+    guard_script = steps[0]["run"]
+    match = re.search(r"TOLERANCE_MINUTES=(\d+)", guard_script)
+    assert match is not None
+    tolerance = int(match.group(1))
+    assert 0 < tolerance < 60
+
+
+def test_workflow_cron_minutes_are_offset_off_the_hour(workflow):
+    # GitHub's own guidance: jobs scheduled exactly on the hour (:00) face
+    # the most platform-wide queue contention. All four entries should be
+    # offset to reduce (not eliminate) delay risk.
+    triggers = _triggers(workflow)
+    for entry in triggers["schedule"]:
+        minute_field = entry["cron"].split()[0]
+        assert minute_field != "0", f"cron '{entry['cron']}' is scheduled exactly on the hour"
 
 
 def test_workflow_gates_later_steps_on_time_check(workflow):

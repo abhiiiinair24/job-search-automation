@@ -363,12 +363,22 @@ triggering. Two things about it are worth understanding:
 UTC and has no timezone concept. 8:00 AM / 8:00 PM America/New_York shifts
 between UTC-4 (EDT, roughly March–November) and UTC-5 (EST, the rest of
 the year), so the workflow schedules **four** cron entries — both times at
-both possible offsets — and a runtime guard step checks the actual current
-`America/New_York` clock hour and skips the rest of the job unless it's
-really 8am or 8pm locally. In practice this means exactly one of the two
-candidate cron firings per target time does anything each day; the other
-exits immediately as a no-op. This avoids needing to hand-maintain a DST
-cutover date in the workflow.
+both possible offsets, each at `:07` past the hour rather than exactly on
+it (GitHub's own guidance: on-the-hour jobs face the most platform-wide
+queue contention, since everyone else's cron jobs fire then too). A
+runtime guard step checks the actual current `America/New_York` clock and
+runs only if it's within 45 minutes of 8:00am or 8:00pm locally — a
+minute-precision tolerance window, not just an hour match, chosen to stay
+safely under the 60-minute gap to the *other* (wrong-season) entry's
+target, so the two candidate firings per target time never both pass. In
+practice this means one of the two candidate cron firings per target time
+runs the real job each day; the other exits immediately as a no-op. This
+avoids needing to hand-maintain a DST cutover date in the workflow.
+Neither the offset nor the tolerance window guarantees on-time execution —
+GitHub documents that scheduled workflows can occasionally be delayed
+substantially (hours, not just minutes) during high platform load; a
+delay that large will still correctly result in a skipped run rather than
+firing at the wrong local time.
 
 **Send-then-mark-seen ordering.** The workflow's "Run job search and send
 email" step invokes `python3 -m jobsearch.orchestrator` — the *same*
@@ -429,7 +439,7 @@ firings.
 | `EmailConfigError: JOBSEARCH_RECIPIENT_EMAIL is not set` | Same idea — set that secret/env var. |
 | Log says "ADZUNA_APP_ID/ADZUNA_APP_KEY not configured - job discovery is disabled" | Expected if you haven't set them — the run falls back to direct-watch only (`config/boards.json`), which is usually not what you want. Sign up free at developer.adzuna.com and set both. |
 | Gmail send fails with an auth error | The refresh token may have been revoked (password change, manual revocation at myaccount.google.com/permissions, or the OAuth consent screen falling out of "Testing" test-user list). Re-run `scripts/get_gmail_refresh_token.py` and update the secret. |
-| Workflow runs but does nothing (no error) | Check the "Check scheduled run time" step's log — if the current `America/New_York` hour wasn't 08 or 20, that's by design (see DST handling above). Use `workflow_dispatch` to force a real run regardless of time. |
+| Workflow runs but does nothing (no error) | Check the "Check scheduled run time" step's log — if the current `America/New_York` time wasn't within 45 minutes of 8:00am/8:00pm, that's by design (see DST handling above). A very large gap (hours) usually means GitHub delayed that particular scheduled run substantially — the *other* seasonal cron entry, or the next scheduled time, should still fire normally. Use `workflow_dispatch` to force a real run regardless of time. |
 | Same jobs emailed twice | Check whether `data/seen_jobs.json` actually got committed after the previous run (look at the "Commit updated seen-job state" step) — if that step didn't run (e.g. the email step failed), the previous run's jobs were correctly *not* marked seen and will legitimately reappear until a send succeeds. |
 | Workflow can't push the updated seen-job file | Confirm `permissions: contents: write` is present in the workflow (it fails clearly with a permissions error otherwise) and that branch protection rules (if any) allow the `GITHUB_TOKEN` to push directly. |
 | Local `python3 -m jobsearch.orchestrator` finds 0 new jobs | First check `ADZUNA_APP_ID`/`ADZUNA_APP_KEY` are set (discovery is silently disabled without them — see the row above). If they are set, an empty result with no error is often legitimately "no matches right now" for your target roles within the recency window; also check `config/boards.json` if you're relying on direct-watch for a specific company. |
